@@ -8,7 +8,7 @@
 %%
 -export([main/1]).
 -export([cat/1, cat/2, visit_log/2, filter/2, print_log/3, print_zlist/3]).
--export([worker/2]).
+-export([worker_fun/4]).
 
 -define(REPORT_SEPARATOR,"~n### ~p -----------------------------------------------------------------------~n").
 
@@ -55,14 +55,22 @@ print_zlist(Options, PrintFun, LogZList) when is_function(PrintFun, 1) ->
     LogZList1 = zlists:ziph(zlists:seq(1, 1000000000000, 1), LogZList),
 
     BunchedList = bunch_zlist(100, LogZList1),
-    {ProcNum, Self} = {erlang:system_info(logical_processors), self()},
-    {Tasks, Later} = zlists:scroll(ProcNum, BunchedList),
-    lists:foldl(fun(Task, Acc) ->
-                        spawn(fun() -> Self ! {Acc, worker(Task, Options)} end),
-                        Acc+1
-               end, 1, Tasks),
-    print_work(1, PrintFun, ProcNum, Later, Options).
-
+    Self = self(),
+    Reader = spawn(fun() ->
+                           print_work(1, PrintFun, undefined),
+                           Self ! ok end),
+    
+    _WorkMan= spawn(fun() -> worker_manager(Reader,
+                                           erlang:system_info(logical_processors),
+                                           BunchedList,
+                                           Options) end),
+    receive
+        ok ->
+            ok
+    end.
+                           
+    
+    
 print_evt(PrintFun, {N, Report}) ->
     PrintFun(io_lib:format(?REPORT_SEPARATOR, [N])),
     PrintFun(Report).
@@ -127,36 +135,68 @@ filter([Opt|Tail]=_Options,LogZList) ->
 %%
 %% Local Functions
 %%
+print_work(Num, _, Num) ->
+    ok;
 
-print_work(Num, PrintFun, Num, [], _) ->
+print_work(Num, PrintFun, undefined) ->
     receive
-        {Num, Work} ->
-            [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ]
+        {max, Num} ->
+            ok;
+        {max, Last} ->
+            print_work(Num, PrintFun, Last);
+        {Pid, Num, Work} ->
+            Pid ! ok,
+            [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ],
+            print_work(Num + 1, PrintFun, undefined)
     end;
 
-print_work(Num, PrintFun, Last, [], Opts) ->
+print_work(Num, PrintFun, Last) ->
     receive
-        {Num, Work} ->
+        {Pid, Num, Work} ->
+            Pid ! ok,
             [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ],
-            print_work(Num + 1, PrintFun, Last, [], Opts)
-    end;    
-
-print_work(Num, PrintFun, Last, [Bunch | ZlistFun], Opts) ->
-    receive
-        {Num, Work} ->
-            [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ],
-            Self = self(),
-            spawn( fun() ->
-                          Self ! {Last + 1, worker(Bunch, Opts)}
-                   end ),
-            print_work(Num + 1, PrintFun, Last + 1, ZlistFun(), Opts)
-    end.
+            print_work(Num + 1, PrintFun, Last)
+    end.            
+    
 
 worker(List, Options) ->
     lists:map( fun({_N,{NTime,Evt}})->
                        Event = {calendar:now_to_universal_time(NTime),Evt},
                        {_N, error_log_tool_fmt:format_event(Event)}
                end, filter(Options, List)).
+
+%%------------------------------------------------------------------------------
+
+worker_manager(Reader, ProcNum, Zlist, Options) ->
+    process_flag(trap_exit, true),
+    
+    {Tasks, Later} = zlists:scroll(ProcNum, Zlist),
+    lists:foldl(fun(Task, Acc) ->
+                        proc_lib:spawn_link(fun() -> worker_fun(Reader, Acc, Task, Options) end),
+                        Acc+1
+               end, 1, Tasks),
+   
+    worker_manager_i(Reader, ProcNum, Later, Options).
+
+worker_manager_i(Reader, Last, [], _) ->
+    Reader ! {max, Last};
+
+worker_manager_i(Reader, Last, [Bunch | Zlist], Opts) ->
+    receive
+        {'EXIT', _, _} ->
+            ok
+    end,
+    proc_lib:spawn_link(fun() -> worker_fun(Reader, Last + 1, Bunch, Opts) end),
+    worker_manager_i(Reader, Last + 1, Zlist(), Opts).
+
+worker_fun(Reader, Num, Task, Options) ->
+    Reader ! {self(), Num, worker(Task, Options)},
+    receive
+        ok ->
+            ok
+    end.
+
+%%------------------------------------------------------------------------------
 
 bunch_zlist(Num, Zlist) ->
     case zlists:scroll(Num, Zlist) of
