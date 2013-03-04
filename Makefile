@@ -4,6 +4,7 @@ all: clean compile
 
 compile: deps
 	@$(REBAR) compile
+	@$(REBAR) escriptize
 
 deps:
 	@$(REBAR) get-deps
