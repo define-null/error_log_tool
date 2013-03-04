@@ -8,6 +8,7 @@
 %%
 -export([main/1]).
 -export([cat/1, cat/2, visit_log/2, filter/2, print_log/3, print_zlist/3]).
+-export([worker/2]).
 
 -define(REPORT_SEPARATOR,"~n### ~p -----------------------------------------------------------------------~n").
 
@@ -39,45 +40,35 @@ cat(LogFilename) ->
     cat([], LogFilename).
 
 cat(Options, LogFilename) ->
-    print_log(
-        Options, 
-        fun(IoList) ->
-            io:format(standard_io, "~s",[IoList])
-        end, 
-        LogFilename).
+    print_log(Options,
+              fun(IoList) ->
+                      io:format(standard_io, "~s",[IoList])
+              end, 
+              LogFilename).
 
 print_log(Options, PrintFun, LogFilename) when is_function(PrintFun, 1) ->
-    visit_log(
-      fun(LogZList)->
-        print_zlist(Options, PrintFun, LogZList)
-      end, LogFilename).
+    visit_log( fun(LogZList)->
+                       print_zlist(Options, PrintFun, LogZList)
+               end, LogFilename).
 
 print_zlist(Options, PrintFun, LogZList) when is_function(PrintFun, 1) ->
-    LogZList1=filter(Options, 
-                     zlists:ziph(zlists:seq(1, 1000000000000, 1), 
-                                 LogZList)),
-    LogZList2=zlists:map(
-                fun({_N,{NTime,Evt}})->
-                        {_N,{calendar:now_to_universal_time(NTime),Evt}}
-                end, LogZList1),
-    case lists:keyfind(max_limit, 1, Options) of
-        {max_limit, Limit} -> LogZList3=zlists:take2(Limit, LogZList2);
-        false          -> LogZList3=LogZList2
-    end,
-    zlists:foreach(
-      fun(E) -> print_evt(PrintFun,E) end,
-      LogZList3 ).
+    LogZList1 = zlists:ziph(zlists:seq(1, 1000000000000, 1), LogZList),
 
-print_evt(PrintFun, {N, TaggedEvt}) ->
+    BunchedList = bunch_zlist(100, LogZList1),
+    {ProcNum, Self} = {erlang:system_info(logical_processors), self()},
+    {Tasks, Later} = zlists:scroll(ProcNum, BunchedList),
+    lists:foldl(fun(Task, Acc) ->
+                        spawn(fun() -> Self ! {Acc, worker(Task, Options)} end),
+                        Acc+1
+               end, 1, Tasks),
+    print_work(1, PrintFun, ProcNum, Later, Options).
+
+print_evt(PrintFun, {N, Report}) ->
     PrintFun(io_lib:format(?REPORT_SEPARATOR, [N])),
-    Report=error_log_tool_fmt:format_event(TaggedEvt),
     PrintFun(Report).
 
 visit_log(Fun, LogFilename) when is_function(Fun, 1) ->
-    {ok,Log}=disk_log:open(
-               [{name,LogFilename},
-                {file,LogFilename},
-                {mode,read_only}]),
+    {ok,Log}=disk_log:open([{name,LogFilename}, {file,LogFilename}, {mode,read_only}]),
     try Z=zlists_disk_log:read(Log),
         Fun(Z)
     after
@@ -91,25 +82,25 @@ filter([Opt|Tail]=_Options,LogZList) ->
         'all'  ->
             Z=LogZList;
         'sasl' ->
-            Z=zlists:filter(
+            Z=lists:filter(
                 fun({_N,{_, {_, _, {_, Type, _}} }})->
                         lists:member(Type, [supervisor_report,progress,crash_report]);
                    (_) -> false
                 end, LogZList);
         'sasl-crash' ->
-            Z=zlists:filter(
+            Z=lists:filter(
                 fun({_N,{_, {_, _, {_, Type, _}} }})->
                         lists:member(Type, [crash_report]);
                    (_) -> false
                 end, LogZList);
         'error' ->
-            Z=zlists:filter(
+            Z=lists:filter(
                 fun({_N,{_, {Type, _, {_, _, _}} }})->
                         lists:member(Type, [error,error_msg,error_report]);
                    (_) -> false
                 end, LogZList);
         'warn' ->
-            Z=zlists:filter(
+            Z=lists:filter(
                 fun({_N,{_, {Type, _, {_, _, _}} }})->
                         lists:member(Type, [error,error_report,warning_report,warning_msg]);
                    (_) -> false
@@ -117,13 +108,13 @@ filter([Opt|Tail]=_Options,LogZList) ->
         {nodes_inc, 'all'} ->
             Z=LogZList;
         {nodes_inc, Nodes} when is_list(Nodes) ->
-            Z=zlists:filter(
+            Z=lists:filter(
                 fun({_N,{_, {_, Pid, {_, _, _}} }})->
                         lists:member(node(Pid), Nodes);
                    (_) -> false
                 end, LogZList);
         {nodes_exc, Nodes} when is_list(Nodes) ->
-            Z=zlists:filter(
+            Z=lists:filter(
                 fun({_N,{_, {_, Pid, {_, _, _}} }})->
                         not lists:member(node(Pid), Nodes);
                    (_) -> false
@@ -137,4 +128,41 @@ filter([Opt|Tail]=_Options,LogZList) ->
 %% Local Functions
 %%
 
+print_work(Num, PrintFun, Num, [], _) ->
+    receive
+        {Num, Work} ->
+            [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ]
+    end;
 
+print_work(Num, PrintFun, Last, [], Opts) ->
+    receive
+        {Num, Work} ->
+            [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ],
+            print_work(Num + 1, PrintFun, Last, [], Opts)
+    end;    
+
+print_work(Num, PrintFun, Last, [Bunch | ZlistFun], Opts) ->
+    receive
+        {Num, Work} ->
+            [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ],
+            Self = self(),
+            spawn( fun() ->
+                          Self ! {Last + 1, worker(Bunch, Opts)}
+                   end ),
+            print_work(Num + 1, PrintFun, Last + 1, ZlistFun(), Opts)
+    end.
+
+worker(List, Options) ->
+    lists:map( fun({_N,{NTime,Evt}})->
+                       Event = {calendar:now_to_universal_time(NTime),Evt},
+                       {_N, error_log_tool_fmt:format_event(Event)}
+               end, filter(Options, List)).
+
+bunch_zlist(Num, Zlist) ->
+    case zlists:scroll(Num, Zlist) of
+        {[], _} ->
+            [];
+        {L, T} ->
+            [L | fun() -> bunch_zlist(Num, T) end]
+    end.
+                 
