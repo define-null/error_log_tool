@@ -47,14 +47,12 @@ cat(Options, LogFilename) ->
               LogFilename).
 
 print_log(Options, PrintFun, LogFilename) when is_function(PrintFun, 1) ->
-    visit_log( fun(LogZList)->
-                       print_zlist(Options, PrintFun, LogZList)
-               end, LogFilename).
+    visit_log(fun(LogZList)-> print_zlist(Options, PrintFun, LogZList) end, LogFilename).
 
 print_zlist(Options, PrintFun, LogZList) when is_function(PrintFun, 1) ->
     LogZList1 = zlists:ziph(zlists:seq(1, 1000000000000, 1), LogZList),
 
-    BunchedList = bunch_zlist(100, LogZList1),
+    BunchedList = bunch_zlist(50, LogZList1),
     Self = self(),
     Reader = spawn(fun() ->
                            print_work(1, PrintFun, undefined),
@@ -68,17 +66,16 @@ print_zlist(Options, PrintFun, LogZList) when is_function(PrintFun, 1) ->
         ok ->
             ok
     end.
-                           
-    
     
 print_evt(PrintFun, {N, Report}) ->
-    PrintFun(io_lib:format(?REPORT_SEPARATOR, [N])),
-    PrintFun(Report).
+    file:write(standard_io, io_lib:format(?REPORT_SEPARATOR, [N])),
+    file:write(standard_io, Report),
+    ok.
 
 visit_log(Fun, LogFilename) when is_function(Fun, 1) ->
     {ok,Log}=disk_log:open([{name,LogFilename}, {file,LogFilename}, {mode,read_only}]),
     try Z=zlists_disk_log:read(Log),
-        Fun(Z)
+         Fun(Z)
     after
         disk_log:close(Log)
     end.
@@ -140,14 +137,14 @@ print_work(Num, _, Num) ->
 
 print_work(Num, PrintFun, undefined) ->
     receive
-        {max, Num} ->
-            ok;
-        {max, Last} ->
-            print_work(Num, PrintFun, Last);
         {Pid, Num, Work} ->
             Pid ! ok,
             [ print_evt(PrintFun, {N, W}) || {N,W} <- Work ],
-            print_work(Num + 1, PrintFun, undefined)
+            print_work(Num + 1, PrintFun, undefined);
+        {max, Num} ->
+            ok;
+        {max, Last} ->
+            print_work(Num, PrintFun, Last)
     end;
 
 print_work(Num, PrintFun, Last) ->
@@ -172,7 +169,7 @@ worker_manager(Reader, ProcNum, Zlist, Options) ->
     
     {Tasks, Later} = zlists:scroll(ProcNum, Zlist),
     lists:foldl(fun(Task, Acc) ->
-                        proc_lib:spawn_link(fun() -> worker_fun(Reader, Acc, Task, Options) end),
+                        spawn_link(fun() -> worker_fun(Reader, Acc, Task, Options) end),
                         Acc+1
                end, 1, Tasks),
    
@@ -186,7 +183,7 @@ worker_manager_i(Reader, Last, [Bunch | Zlist], Opts) ->
         {'EXIT', _, _} ->
             ok
     end,
-    proc_lib:spawn_link(fun() -> worker_fun(Reader, Last + 1, Bunch, Opts) end),
+    spawn_link(fun() -> worker_fun(Reader, Last + 1, Bunch, Opts) end),
     worker_manager_i(Reader, Last + 1, Zlist(), Opts).
 
 worker_fun(Reader, Num, Task, Options) ->
