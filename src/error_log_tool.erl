@@ -69,7 +69,7 @@ print_zlist(Options, LogZList) ->
             ok;
         _ ->
             Reader = spawn(fun() ->
-                                   print_work(1, undefined, Options),
+                                   print_work(0, undefined, Options),
                                    Self ! ok
                            end),
 
@@ -100,7 +100,7 @@ visit_log(Fun, LogFilename) when is_function(Fun, 1) ->
 %%
 %% Local Functions
 %%
-print_work(1, undefined, Options)
+print_work(0, undefined, Options)
   when is_list(Options) ->
     File = proplists:get_value(file, Options),
     Format = case proplists:get_value(format, Options) of
@@ -110,17 +110,18 @@ print_work(1, undefined, Options)
                      ?FILE_SEPARATOR(File)
              end,
     
-    print_work(1, undefined, #print{format = Format});
+    print_work(0, undefined, #print{format = Format});
 
 print_work(Num, Num, #print{}) ->
     ok;
 
 print_work(Num, undefined, #print{format = Format}=Print) ->
+    Waiting = Num + 1,
     receive
-        {Pid, Num, Work} ->
+        {Pid, Waiting, Work} ->
             Pid ! ok,
             [ print_evt({N, W}, Format) || {N,W} <- Work ],
-            print_work(Num + 1, undefined, Print);
+            print_work(Waiting, undefined, Print);
         {max, Num} ->
             ok;
         {max, Last} ->
@@ -129,11 +130,12 @@ print_work(Num, undefined, #print{format = Format}=Print) ->
 
 print_work(Num, Last, #print{format = Format}=Print)
   when is_integer(Last) ->
+    Waiting = Num + 1,
     receive
-        {Pid, Num, Work} ->
+        {Pid, Waiting, Work} ->
             Pid ! ok,
             [ print_evt({N, W}, Format) || {N,W} <- Work ],
-            print_work(Num + 1, Last, Print)
+            print_work(Waiting, Last, Print)
     end.            
     
 %%------------------------------------------------------------------------------
@@ -141,15 +143,15 @@ print_work(Num, Last, #print{format = Format}=Print)
 worker_manager(Reader, ProcNum, Zlist, Options) ->
     process_flag(trap_exit, true),
     
-    {Tasks, Later} = zlists:scroll(ProcNum, Zlist),
-    lists:foldl(fun(Task, Acc) ->
-                        spawn_link(fun() ->
-                                           worker_fun(Reader, Acc, Task, Options)
-                                   end),
-                        Acc+1
-               end, 1, Tasks),
+    {Tasks, Tail} = zlists:scroll(ProcNum, Zlist),
+    N = lists:foldl(fun(Task, Acc) ->
+                            spawn_link(fun() ->
+                                               worker_fun(Reader, Acc + 1, Task, Options)
+                                       end),
+                            Acc + 1
+                    end, 0, Tasks),
     
-    worker_manager_i(Reader, ProcNum, Later, Options).
+    worker_manager_i(Reader, N, Tail, Options).
 
 worker_manager_i(Reader, Last, [], _) ->
     Reader ! {max, Last};
