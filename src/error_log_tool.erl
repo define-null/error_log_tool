@@ -63,19 +63,25 @@ print_zlist(Options, LogZList) ->
 
     BunchedList = bunch_zlist(50, LogZList1),
     Self = self(),
-    Reader = spawn(fun() ->
-                           print_work(1, undefined, Options),
-                           Self ! ok
-                   end),
-    
-    _WorkMan= spawn(fun() -> worker_manager(Reader,
-                                            erlang:system_info(logical_processors),
-                                            BunchedList,
-                                            Options)
-                    end),
-    receive
-        ok ->
-            ok
+
+    case BunchedList of
+        [] ->
+            ok;
+        _ ->
+            Reader = spawn(fun() ->
+                                   print_work(1, undefined, Options),
+                                   Self ! ok
+                           end),
+
+            _WorkMan= spawn(fun() -> worker_manager(Reader,
+                                                    erlang:system_info(logical_processors),
+                                                    BunchedList,
+                                                    Options)
+                            end),
+            receive
+                ok ->
+                    ok
+            end
     end.
     
 print_evt({N, Report}, Format) ->
